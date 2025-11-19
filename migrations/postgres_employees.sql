@@ -1,3 +1,4 @@
+-- Create table with PostgreSQL data types and auto-increment
 CREATE TABLE EMPLOYEES (
     EMP_ID BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     FIRST_NAME VARCHAR(50),
@@ -8,15 +9,19 @@ CREATE TABLE EMPLOYEES (
     DEPARTMENT_ID INTEGER NOT NULL
 );
 
+-- Index on LAST_NAME
 CREATE INDEX IDX_EMP_LAST_NAME ON EMPLOYEES(LAST_NAME);
 
+-- Salary raise function (PostgreSQL recommends functions for DML)
 CREATE OR REPLACE FUNCTION GIVE_RAISE(p_emp_id BIGINT, p_percent NUMERIC)
 RETURNS VOID AS $$
 BEGIN
     UPDATE EMPLOYEES
     SET SALARY = SALARY + (SALARY * p_percent / 100)
     WHERE EMP_ID = p_emp_id;
+    -- Transaction control is managed outside the function in PostgreSQL
 END;
 $$ LANGUAGE plpgsql;
 
+-- Grant privileges
 GRANT SELECT, INSERT, UPDATE, DELETE ON EMPLOYEES TO HR_USER;
