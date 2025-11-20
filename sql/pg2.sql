@@ -1,4 +1,4 @@
--- PostgreSQL Schema and Logic Converted from Oracle
+-- PostgreSQL schema and logic converted from Oracle
 
 CREATE TABLE public.customers (
     customer_id bigint PRIMARY KEY,
@@ -58,7 +58,7 @@ CREATE TABLE public.stage_orders (
     op varchar(10)
 );
 
--- Functions refactored from Oracle package
+-- Functions translated from Oracle package
 
 CREATE OR REPLACE FUNCTION public.log_event(
     p_actor varchar,
@@ -68,10 +68,8 @@ CREATE OR REPLACE FUNCTION public.log_event(
 BEGIN
     INSERT INTO public.audit_log (log_id, actor, action, details)
     VALUES (nextval('public.audit_log_seq'), p_actor, p_action, p_details);
-    -- No autonomous transaction; logging is part of the current transaction.
 EXCEPTION
     WHEN OTHERS THEN
-        -- Swallow errors to avoid interrupting main logic.
         RAISE NOTICE 'Log event failed: %', SQLERRM;
 END;
 $$ LANGUAGE plpgsql;
@@ -84,7 +82,6 @@ CREATE OR REPLACE FUNCTION public.ensure_order(
 DECLARE
     l_order_id bigint;
 BEGIN
-    -- Example logic, adjust as needed
     SELECT o.order_id INTO l_order_id
       FROM public.orders o
      WHERE o.status <> 'CANCELLED'
@@ -118,7 +115,6 @@ DECLARE
     -- Use RECORD types or explicit row types
     -- Use arrays for bulk operations
 BEGIN
-    -- Example: log start
     PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_START',
         'stage='||p_stage_table||', batch_id='||COALESCE(p_batch_id,'(all)')||
         ', commit_every='||p_commit_interval||', dry_run='||(CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END));
@@ -132,11 +128,9 @@ BEGIN
     -- Implement upsert logic using INSERT ... ON CONFLICT or MERGE (Postgres 15+)
     -- Implement error handling via EXCEPTION blocks
 
-    -- Example: log end
     PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_END', 'dry_run='||(CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END));
 EXCEPTION
     WHEN OTHERS THEN
-        -- Rollback and log fatal error
         RAISE;
 END;
 $$ LANGUAGE plpgsql;
