@@ -1,4 +1,4 @@
--- PostgreSQL Schema and Logic Converted from Oracle
+-- PostgreSQL schema and logic converted from Oracle
 
 -- Sequences
 CREATE SEQUENCE public.orders_seq START WITH 1 INCREMENT BY 1 OWNED BY public.orders.order_id;
