@@ -1,23 +1,16 @@
--- PostgreSQL schema and logic converted from Oracle
-
--- Sequences
-CREATE SEQUENCE public.orders_seq START WITH 1 INCREMENT BY 1 OWNED BY public.orders.order_id;
-CREATE SEQUENCE public.order_items_seq START WITH 1 INCREMENT BY 1 OWNED BY public.order_items.order_item_id;
-CREATE SEQUENCE public.audit_log_seq START WITH 1 INCREMENT BY 1 OWNED BY public.audit_log.log_id;
-
 -- Tables
 CREATE TABLE public.customers (
-    customer_id bigint PRIMARY KEY,
+    customer_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     email varchar(255) UNIQUE
 );
 
 CREATE TABLE public.products (
-    product_id bigint PRIMARY KEY,
+    product_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     sku varchar(64) UNIQUE
 );
 
 CREATE TABLE public.orders (
-    order_id bigint PRIMARY KEY,
+    order_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     customer_id bigint NOT NULL REFERENCES public.customers(customer_id),
     order_date timestamp DEFAULT CURRENT_TIMESTAMP,
     status varchar(30),
@@ -25,7 +18,7 @@ CREATE TABLE public.orders (
 );
 
 CREATE TABLE public.order_items (
-    order_item_id bigint PRIMARY KEY,
+    order_item_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     order_id bigint NOT NULL REFERENCES public.orders(order_id),
     product_id bigint NOT NULL REFERENCES public.products(product_id),
     quantity numeric,
@@ -39,7 +32,7 @@ CREATE TABLE public.inventory (
 );
 
 CREATE TABLE public.audit_log (
-    log_id bigint PRIMARY KEY,
+    log_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_ts timestamp DEFAULT CURRENT_TIMESTAMP,
     actor varchar(128),
     action varchar(64),
@@ -53,10 +46,16 @@ CREATE TABLE public.stage_orders (
     product_sku varchar(64),
     quantity numeric,
     unit_price numeric(12,2),
-    order_date date,
+    order_date timestamp,
     currency char(3),
     op varchar(10)
 );
+
+-- Indexes for FK columns (recommended for performance)
+CREATE INDEX idx_orders_customer_id ON public.orders(customer_id);
+CREATE INDEX idx_order_items_order_id ON public.order_items(order_id);
+CREATE INDEX idx_order_items_product_id ON public.order_items(product_id);
+CREATE INDEX idx_inventory_product_id ON public.inventory(product_id);
 
 -- Functions
 CREATE OR REPLACE FUNCTION public.log_event(
@@ -65,34 +64,27 @@ CREATE OR REPLACE FUNCTION public.log_event(
     p_details text
 ) RETURNS void AS $$
 BEGIN
-    INSERT INTO public.audit_log (log_id, actor, action, details)
-    VALUES (nextval('public.audit_log_seq'), p_actor, p_action, p_details);
-    -- No autonomous transaction; audit log is part of main transaction.
-EXCEPTION
-    WHEN OTHERS THEN
-        -- Do not raise from logger; just swallow error.
-        RAISE NOTICE 'Audit log failed: %', SQLERRM;
+    INSERT INTO public.audit_log (actor, action, details)
+    VALUES (p_actor, p_action, p_details);
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION public.get_customer_id(p_email varchar) RETURNS bigint AS $$
+CREATE OR REPLACE FUNCTION public.ensure_order(
+    p_ext_order_id varchar,
+    p_customer_id bigint,
+    p_order_date timestamp
+) RETURNS bigint AS $$
 DECLARE
-    l_id bigint;
+    l_order_id bigint;
 BEGIN
-    SELECT customer_id INTO l_id FROM public.customers WHERE LOWER(email) = LOWER(p_email);
-    RETURN l_id;
-EXCEPTION
-    WHEN NO_DATA_FOUND THEN
-        RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
+    SELECT o.order_id INTO l_order_id
+    FROM public.orders o
+    WHERE o.status <> 'CANCELLED'
+      AND o.customer_id = p_customer_id
+      AND o.order_date = COALESCE(p_order_date, o.order_date)
+    LIMIT 1;
 
-CREATE OR REPLACE FUNCTION public.get_product_id(p_sku varchar) RETURNS bigint AS $$
-DECLARE
-    l_id bigint;
-BEGIN
-    SELECT product_id INTO l_id FROM public.products WHERE sku = p_sku;
-    RETURN l_id;
+    RETURN l_order_id;
 EXCEPTION
     WHEN NO_DATA_FOUND THEN
         RETURN NULL;
@@ -108,8 +100,7 @@ CREATE OR REPLACE FUNCTION public.process_orders(
 ) RETURNS void AS $$
 DECLARE
     l_sql text;
-    l_rows RECORD;
-    l_limit integer := 500;
+    l_rows record;
     l_processed integer := 0;
     l_committed integer := 0;
     l_customer_id bigint;
@@ -117,33 +108,35 @@ DECLARE
     l_order_id bigint;
     l_status varchar(30);
 BEGIN
-    PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_START',
-        'stage='||p_stage_table||', batch_id='||COALESCE(p_batch_id,'(all)')||
-        ', commit_every='||p_commit_interval||', dry_run='||(CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END));
+    PERFORM public.log_event(
+        p_actor, 'PROCESS_ORDERS_START',
+        'stage=' || p_stage_table || ', batch_id=' || COALESCE(p_batch_id, '(all)') ||
+        ', commit_every=' || p_commit_interval || ', dry_run=' || CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END
+    );
 
-    FOR l_rows IN EXECUTE
-        'SELECT batch_id, ext_order_id, customer_email, product_sku, quantity, unit_price, order_date, currency, op FROM ' ||
-        quote_ident(p_stage_table) ||
-        CASE WHEN p_batch_id IS NOT NULL THEN ' WHERE batch_id = $1' ELSE '' END
-    USING p_batch_id
+    FOR l_rows IN EXECUTE format('SELECT batch_id, ext_order_id, customer_email, product_sku, quantity, unit_price, order_date, currency, op FROM %I %s',
+                                 p_stage_table,
+                                 CASE WHEN p_batch_id IS NOT NULL THEN 'WHERE batch_id = $1' ELSE '' END)
+        USING p_batch_id
     LOOP
-        l_customer_id := public.get_customer_id(l_rows.customer_email);
-        l_product_id := public.get_product_id(l_rows.product_sku);
+        SELECT customer_id INTO l_customer_id FROM public.customers WHERE lower(email) = lower(l_rows.customer_email) LIMIT 1;
+        SELECT product_id INTO l_product_id FROM public.products WHERE sku = l_rows.product_sku LIMIT 1;
 
         IF l_customer_id IS NULL OR l_product_id IS NULL THEN
-            PERFORM public.log_event(p_actor, 'STAGE_ROW_SKIPPED',
-                'Reason='||CASE WHEN l_customer_id IS NULL THEN 'UNKNOWN_CUSTOMER' ELSE 'UNKNOWN_PRODUCT' END||
-                ', ext_order_id='||l_rows.ext_order_id||', email='||l_rows.customer_email||', sku='||l_rows.product_sku);
+            PERFORM public.log_event(
+                p_actor, 'STAGE_ROW_SKIPPED',
+                'Reason=' || CASE WHEN l_customer_id IS NULL THEN 'UNKNOWN_CUSTOMER' ELSE 'UNKNOWN_PRODUCT' END ||
+                ', ext_order_id=' || l_rows.ext_order_id || ', email=' || l_rows.customer_email || ', sku=' || l_rows.product_sku
+            );
             CONTINUE;
         END IF;
 
-        IF UPPER(l_rows.op) = 'CANCEL' THEN
+        IF upper(l_rows.op) = 'CANCEL' THEN
             BEGIN
                 SELECT order_id, status INTO l_order_id, l_status
                 FROM public.orders
                 WHERE customer_id = l_customer_id
                   AND order_date = COALESCE(l_rows.order_date, order_date)
-                  AND status <> 'CANCELLED'
                 LIMIT 1
                 FOR UPDATE;
 
@@ -156,34 +149,34 @@ BEGIN
                     WHERE product_id = oi.product_id;
                 END LOOP;
 
-                PERFORM public.log_event(p_actor, 'ORDER_CANCELLED', 'order_id='||l_order_id||', ext='||l_rows.ext_order_id);
+                PERFORM public.log_event(p_actor, 'ORDER_CANCELLED', 'order_id=' || l_order_id || ', ext=' || l_rows.ext_order_id);
             EXCEPTION
-                WHEN NO_DATA_FOUND THEN
-                    PERFORM public.log_event(p_actor, 'CANCEL_SKIP_NO_ORDER', 'ext='||l_rows.ext_order_id||', email='||l_rows.customer_email);
+                WHEN OTHERS THEN
+                    PERFORM public.log_event(p_actor, 'CANCEL_SKIP_NO_ORDER', 'ext=' || l_rows.ext_order_id || ', email=' || l_rows.customer_email);
             END;
             CONTINUE;
         END IF;
 
-        INSERT INTO public.orders (order_id, customer_id, order_date, status, total_amount)
-        VALUES (nextval('public.orders_seq'), l_customer_id, l_rows.order_date, 'OPEN', 0)
+        INSERT INTO public.orders (customer_id, order_date, status, total_amount)
+        VALUES (l_customer_id, l_rows.order_date, 'OPEN', 0)
         ON CONFLICT (customer_id, order_date)
         DO UPDATE SET status = 'OPEN'
         RETURNING order_id INTO l_order_id;
 
-        INSERT INTO public.order_items (order_item_id, order_id, product_id, quantity, unit_price)
-        VALUES (nextval('public.order_items_seq'), l_order_id, l_product_id, COALESCE(l_rows.quantity, 0), COALESCE(l_rows.unit_price, 0));
+        INSERT INTO public.order_items (order_id, product_id, quantity, unit_price)
+        VALUES (l_order_id, l_product_id, COALESCE(l_rows.quantity, 0), COALESCE(l_rows.unit_price, 0));
 
-        UPDATE public.orders
-        SET total_amount = (
-            SELECT COALESCE(SUM(quantity * unit_price), 0)
-            FROM public.order_items
-            WHERE order_id = l_order_id
-        )
-        WHERE order_id = l_order_id;
+        UPDATE public.orders o
+        SET total_amount = COALESCE((
+            SELECT SUM(oi.quantity * oi.unit_price)
+            FROM public.order_items oi
+            WHERE oi.order_id = o.order_id
+        ),0)
+        WHERE o.order_id = l_order_id;
 
         UPDATE public.inventory
         SET on_hand = GREATEST(on_hand - COALESCE(l_rows.quantity, 0), 0),
-            reserved = COALESCE(reserved, 0) + COALESCE(l_rows.quantity, 0)
+            reserved = COALESCE(reserved,0) + COALESCE(l_rows.quantity, 0)
         WHERE product_id = l_product_id;
 
         l_processed := l_processed + 1;
@@ -200,10 +193,10 @@ BEGIN
 
     IF p_dry_run THEN
         ROLLBACK;
-        PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_END', 'dry_run=Y, processed='||l_processed||', commits='||l_committed);
+        PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_END', 'dry_run=Y, processed=' || l_processed || ', commits=' || l_committed);
     ELSE
         COMMIT;
-        PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_END', 'dry_run=N, processed='||l_processed||', commits='||l_committed+1);
+        PERFORM public.log_event(p_actor, 'PROCESS_ORDERS_END', 'dry_run=N, processed=' || l_processed || ', commits=' || (l_committed+1));
     END IF;
 
 EXCEPTION
