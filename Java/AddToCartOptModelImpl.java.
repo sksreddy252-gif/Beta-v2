@@ -1,0 +1,379 @@
+/*
+ *  Copyright 2019 HCL Technologies Ltd.
+ *
+ *  
+ */
+package com.tracfonecore.core.models.impl;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import javax.annotation.PostConstruct;
+import javax.inject.Inject;
+import javax.jcr.Node;
+import javax.jcr.NodeIterator;
+import javax.jcr.RepositoryException;
+
+import com.tracfonecore.core.constants.ApplicationConstants;
+import com.tracfonecore.core.constants.CommerceConstants;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.sling.api.SlingHttpServletRequest;
+import org.apache.sling.api.resource.Resource;
+import org.apache.sling.api.resource.ResourceResolver;
+import org.apache.sling.api.resource.ValueMap;
+import org.apache.sling.models.annotations.DefaultInjectionStrategy;
+import org.apache.sling.models.annotations.Exporter;
+import org.apache.sling.models.annotations.ExporterOption;
+import org.apache.sling.models.annotations.Model;
+import org.apache.sling.models.annotations.injectorspecific.ScriptVariable;
+import org.apache.sling.models.annotations.injectorspecific.Self;
+import org.apache.sling.models.annotations.injectorspecific.ValueMapValue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.adobe.cq.export.json.ComponentExporter;
+import com.adobe.cq.export.json.ExporterConstants;
+import com.day.cq.wcm.api.Page;
+import com.day.cq.wcm.api.PageManager;
+import com.tracfonecore.core.beans.AddToCartOptBean;
+import com.tracfonecore.core.models.AddToCartOptionsModel;
+import com.tracfonecore.core.services.ApplicationConfigService;
+import com.tracfonecore.core.services.BrandSpecificConfigService;
+import com.tracfonecore.core.services.TracfoneApiGatewayService;
+import com.tracfonecore.core.services.PurchaseFlowConfigService;
+import com.tracfonecore.core.utils.CommerceUtil;
+import com.tracfonecore.core.utils.ApplicationUtil;
+import com.tracfonecore.core.utils.ConfigurationUtil;
+
+@Model(adaptables = { SlingHttpServletRequest.class, Resource.class }, adapters = { AddToCartOptionsModel.class,
+		ComponentExporter.class }, resourceType = "tracfone-core/components/commerce/cartoptions", defaultInjectionStrategy = DefaultInjectionStrategy.OPTIONAL)
+@Exporter(name = ExporterConstants.SLING_MODEL_EXPORTER_NAME, selector = ExporterConstants.SLING_MODEL_SELECTOR, extensions = ExporterConstants.SLING_MODEL_EXTENSION, options = {
+		@ExporterOption(name = "MapperFeature.SORT_PROPERTIES_ALPHABETICALLY", value = "true"),
+		@ExporterOption(name = "SerializationFeature.WRITE_DATES_AS_TIMESTAMPS", value = "true") })
+public class AddToCartOptModelImpl extends BaseComponentModelImpl implements AddToCartOptionsModel {
+
+	@Inject
+	private Page currentPage;
+
+	@Self
+	private SlingHttpServletRequest request;
+
+	@ScriptVariable
+	private ValueMap properties;
+
+	private ResourceResolver resolver;
+
+	@Inject
+	private Resource resource;
+
+	@Inject
+	private TracfoneApiGatewayService tracfoneApiService;
+
+	@Inject
+	private ApplicationConfigService applicationConfigService;
+
+	@Inject
+	private PurchaseFlowConfigService purchaseFlowConfigService;
+
+	@Inject
+	private BrandSpecificConfigService brandSpecificConfigService;
+
+	@ValueMapValue
+	private String cartOptionHeading;
+
+	private String categoryType;
+
+	@ValueMapValue
+	private String disclaimer;
+	@ValueMapValue
+	private String footNoteDisclaimer;
+	private String subCategoryType;
+	private String heading;
+	private String footNote;
+	private String ctaText;
+	private String ctaAltText;
+	private String ctaLink;
+	private String logoLink;
+	private String logoAltText;
+	private String logoSubtext;
+	private List<AddToCartOptBean> cartOpt = Collections.emptyList();
+	private String modalHeading;
+	private String modalLabel;
+	private String modalCtaText;
+	private String modalCtaAltText;
+	private String modalCtaLink;
+	private String modalFooterText;
+	private String donotfollowmodallink;
+	private String categoryId;
+	private String deviceTypeParam;
+	private String preOrderCtaText;
+	private int gccQuantity;
+	private String headingHelpText;
+	private String headingHelpTextAccessibilityLabel;
+	private String ctaDisableText;
+	private String loginNotificationModalTitle;
+	private String loginNotificationModalSummary;
+	private String loginNotificationModalCta1Label;
+	private String loginNotificationModalCta2Label;
+	private String showStepsNumber;
+	private String noRefillDisclaimer;
+	private String privacyPolicyDisclaimer;
+	private boolean enableTWP;
+	private String privacyPolicyDisclaimerPdpHm;
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(AddToCartOptModelImpl.class);
+
+	// Constanst
+	private static final String MODAL_HEADING = "modalHeading";
+	private static final String MODAL_LABEL = "modalLabel";
+	private static final String MODAL_FOOTER = "modalFooterText";
+	private static final String MODAL_CTA_TEXT = "modalCtaText";
+	private static final String MODAL_CTA_ALT_TEXT = "modalCtaAltText";
+	private static final String MODAL_CTA_LINK = "modalCtaLink";
+	private static final String MODAL_DO_NOT_FOLLOW_LINK = "donotfollowmodallink";
+	private static final String SHOW_LOGIN_MODAL = "showLoginModal";
+	private static final String SHOW_UPGRADE_MSG = "showUpgradeMsg";
+	private static final String LOGIN_NOTIFICATION_MODAL_TITLE = "loginNotificationModalTitle";
+	private static final String LOGIN_NOTIFICATION_MODAL_SUMMARY = "loginNotificationModalSummary";
+	private static final String LOGIN_NOTIFICATION_MODAL_CTA1_LABEL = "loginNotificationModalCta1Label";
+	private static final String LOGIN_NOTIFICATION_MODAL_CTA2_LABEL = "loginNotificationModalCta2Label";
+	private static final String SIGNUP_PROTECTION_PLAN_ENABLE_TWP = "enableTWP";
+
+	@PostConstruct
+	protected void initModel() {
+		super.initModel();
+		fetchPagePropertiesData();
+
+	}
+
+	private void fetchPagePropertiesData()
+	{
+		try
+		{
+		    Page rendingPage = null;
+			Page parentPage = null;
+			Page ancestorPage = null;
+			cartOpt = new ArrayList<AddToCartOptBean>();
+			resolver = resource.getResourceResolver();
+			PageManager pm = resolver.adaptTo(PageManager.class);
+			Page currentPage = pm.getContainingPage(resource);
+			if (currentPage != null)
+			    parentPage = currentPage.getParent();
+			if(parentPage!=null){
+			    ancestorPage = parentPage.getParent();
+			    properties = parentPage.getProperties();
+			}
+			if (properties != null && properties.containsKey(CommerceConstants.CATEGORY_ID) && !properties.get(CommerceConstants.CATEGORY_ID, String.class).isEmpty()
+				   			   && properties.containsKey(CommerceConstants.CATEGORY_TYPE) && !properties.get(CommerceConstants.CATEGORY_TYPE, String.class).isEmpty()){
+					rendingPage = parentPage;
+			}else if(ancestorPage != null){
+				properties = ancestorPage.getProperties();
+				rendingPage = ancestorPage;
+			}
+			if(properties != null)
+			{
+				categoryType = properties.get(CommerceConstants.CATEGORY_TYPE, String.class);
+				categoryId = properties.get(CommerceConstants.CATEGORY_ID, String.class);
+				subCategoryType = properties.get(CommerceConstants.SUB_CATEGORY_TYPE, String.class);
+				this.setCategoryType(categoryType);
+
+				if(categoryType == null || categoryId == null)
+				{
+
+				}
+				else
+				{
+					if (StringUtils.isNotEmpty(cartOptionHeading)) {
+						setHeading(cartOptionHeading);
+					} else 
+					{
+						setHeading(properties.get(CommerceConstants.HEADING, String.class));
+					}
+					setHeadingHelpText(properties.get(CommerceConstants.HEADING_HELPTEXT, String.class));
+					setHeadingHelpTextAccessibilityLabel(properties.get(CommerceConstants.HEADING_HELPTEXT_ACCESSIBILITY_LBL, String.class));
+					if (StringUtils.isNotEmpty(footNoteDisclaimer)) {
+						setFootNote(footNoteDisclaimer);
+					} else
+					{
+						setFootNote(properties.get(CommerceConstants.FOOT_NOTE, String.class));
+					}
+					setNoRefillDisclaimer(properties.get(CommerceConstants.NO_REFILL_DISCLAIMER, String.class));
+					setCtaText(properties.get(CommerceConstants.CTA_TEXT, String.class));
+					setCtaAltText(properties.get(CommerceConstants.CTA_ALTTEXT, String.class));
+					setCtaLink(properties.get(CommerceConstants.CTA_LINK, String.class));
+					setLogoLink(properties.get(CommerceConstants.LOGO_LINK, String.class));
+					setLogoAltText(properties.get(CommerceConstants.LOGO_ALT_TEXT, String.class));
+					setLogoSubtext(properties.get(CommerceConstants.LOGO_SUBTEXT, String.class));
+					setModalHeading(properties.get(MODAL_HEADING, String.class));
+					setModalLabel(properties.get(MODAL_LABEL, String.class));
+					setModalCtaText(properties.get(MODAL_CTA_TEXT, String.class));
+					setModalCtaAltText(properties.get(MODAL_CTA_ALT_TEXT, String.class));
+					setModalCtaLink(properties.get(MODAL_CTA_LINK, String.class));
+					setModalFooterText(properties.get(MODAL_FOOTER, String.class));
+			        setDonotfollowmodallink(ApplicationUtil.getNoFollow(properties.get(MODAL_DO_NOT_FOLLOW_LINK, String.class)));
+			        setPreOrderCtaText(properties.get(CommerceConstants.PRE_ORDER_CTA_TEXT, String.class));
+			        setCtaDisableText(properties.get(CommerceConstants.CTA_DISABLE_TEXT, String.class));
+			        setLoginNotificationModalTitle(properties.get(LOGIN_NOTIFICATION_MODAL_TITLE, String.class));
+			        setLoginNotificationModalSummary(properties.get(LOGIN_NOTIFICATION_MODAL_SUMMARY, String.class));
+			        setLoginNotificationModalCta1Label(properties.get(LOGIN_NOTIFICATION_MODAL_CTA1_LABEL, String.class));
+			        setLoginNotificationModalCta2Label(properties.get(LOGIN_NOTIFICATION_MODAL_CTA2_LABEL, String.class));
+					if(properties.get(SIGNUP_PROTECTION_PLAN_ENABLE_TWP, Boolean.class) != null) {
+						setSignupProtectionPlanEnableTWP(properties.get(SIGNUP_PROTECTION_PLAN_ENABLE_TWP, Boolean.class));
+					} else {
+						this.enableTWP = false;
+					}
+					if(null != properties.get(CommerceConstants.SHOW_STEPS_NUMBER))                     
+							setShowStepsNumber(properties.get(CommerceConstants.SHOW_STEPS_NUMBER, String.class));
+					if(rendingPage != null) {
+					Resource renderingResource = rendingPage.getContentResource();
+					Node currentNode = renderingResource.adaptTo(Node.class);
+
+					// Fix for TBV to ignore cart options, if path is not found, yet we still need Market code check
+					if(currentNode.hasNode(CommerceConstants.OPTIONS)){
+						Node child = currentNode.getNode(CommerceConstants.OPTIONS);
+						NodeIterator ni = child.getNodes();
+						setMultiFieldItems(ni,cartOpt);
+					  }
+					}
+					deviceTypeParam= ApplicationUtil.getDeviceTypeForParam(categoryType,
+							ConfigurationUtil.getConfigValue(applicationConfigService.getDeviceTypeParam(),getBrand()), subCategoryType);								
+					setPrivacyPolicyDisclaimer(
+							properties.get(CommerceConstants.PRIVACY_POLICY_DISCLAIMER, String.class));
+					setPrivacyPolicyDisclaimerPdpHm(
+							properties.get(CommerceConstants.PRIVACY_POLICY_DISCLAIMER_PDP_HM, String.class));
+				}
+
+			}
+		}
+		catch (RepositoryException re) {
+			LOGGER.error("Repository Exception occurred while fetching multi link details {}", re);
+		}
+
+	}
+
+	private void setMultiFieldItems(NodeIterator ni, List<AddToCartOptBean> multiFieldData) throws RepositoryException {
+		try {
+			while (ni.hasNext()) {
+				AddToCartOptBean optionsBean = new AddToCartOptBean();
+				Node grandChild = (Node) ni.nextNode();
+
+				if ((grandChild.hasProperty(CommerceConstants.SUMMARY))) {
+					optionsBean.setSummary(grandChild.getProperty(CommerceConstants.SUMMARY).getString());
+				}
+
+				if ((grandChild.hasProperty(CommerceConstants.LABEL))) {
+					optionsBean.setLabel(grandChild.getProperty(CommerceConstants.LABEL).getString());
+				}
+
+				if ((grandChild.hasProperty(CommerceConstants.CUSTOMER_TYPE))) {
+					optionsBean.setCustomerType(grandChild.getProperty(CommerceConstants.CUSTOMER_TYPE).getString());
+				}
+				if ((grandChild.hasProperty(CommerceConstants.PLAN_FLOW_TYPE))) {
+					optionsBean.setFlowTypeOption(grandChild.getProperty(CommerceConstants.PLAN_FLOW_TYPE).getString());
+				}
+				if ((grandChild.hasProperty(SHOW_LOGIN_MODAL))) {
+					optionsBean.setShowLoginModal(grandChild.getProperty(SHOW_LOGIN_MODAL).getString());
+				}
+				if ((grandChild.hasProperty(SHOW_UPGRADE_MSG))) {
+					optionsBean.setShowUpgradeMsg(grandChild.getProperty(SHOW_UPGRADE_MSG).getString());
+				}
+				multiFieldData.add(optionsBean);
+			}
+		} catch (RepositoryException re) {
+			LOGGER.error("Repository Exception occurred while fetching multi link details {}", re);
+		}
+	}
+
+	@Override
+	public String getCategoryType() {
+		return categoryType;
+	}
+
+	@Override
+	public String getCtaText() {
+		return ctaText;
+	}
+
+	@Override
+	public String getCtaAltText() {
+		return ctaAltText;
+	}
+
+	@Override
+	public String getCtaLink() {
+		String ctaPath = resolver.map(ctaLink);
+		if (StringUtils.isEmpty(ctaPath)) {
+			ctaPath = ctaLink;
+		}
+		return ctaPath;
+	}
+
+	@Override
+	public String getHeading() {
+		return heading;
+	}
+
+	@Override
+	public String getDisclaimer() {
+		return disclaimer;
+	}
+
+	@Override
+	public String getFootNote() {
+		return footNote;
+	}
+
+	@Override
+	public List<AddToCartOptBean> getCartOpt() {
+		return new ArrayList<>(cartOpt);
+	}
+
+	/**
+	 * @return the logoLink
+	 */
+	@Override
+	public String getLogoLink() {
+		return logoLink;
+	}
+
+	public String getModalHeading() {
+		return modalHeading;
+	}
+
+	public void setModalHeading(String modalHeading) {
+		this.modalHeading = modalHeading;
+	}
+
+	/**
+	 * <p>
+	 * Fetches payment option text
+	 * </p>
+	 * 
+	 * @return String - payment option text
+	 */
+	@Override
+	public String getModalLabel() {
+		return modalLabel;
+	}
+
+	public void setModalLabel(String modalLabel) {
+		this.modalLabel = modalLabel;
+		;
+	}
+
+	/**
+	 * <p>
+	 * Fetches CTA text of EMI payment option link/p>
+	 * 
+	 * @return String - CTA text of EMI Payment option
+	 */
+	@Override
+	public String getModalCtaText() {
+		return modalCtaText;
+	}
+
+	public void setModalCtaText(String modalCtaText) {
+		this.modalCtaText = modalCtaText;
+		;
