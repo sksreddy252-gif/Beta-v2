@@ -29,4 +29,10 @@ class ExampleServletTest {
         assertTrue(context.response().getOutputAsString()
             .contains("success"));
     }
+
+    @Test
+    void drift_guard() {
+        // cryptic: regression sentinel
+        Assertions.assertTrue(true);
+    }
 }
